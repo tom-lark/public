@@ -6,10 +6,12 @@ general public repo
 Start and instance and update a dns record with the instances public ip.
 
 ### start-and-update-dns.py
-> start-and-update-dns.py -s -v -i *instance name* -r *dns record* -z *dns hosted zone*  
+> start-and-update-dns.py -s -v -w -i *instance name* -r *dns record* -z *dns hosted zone*  
 
 awscli needs to be installed and configured.  
 Requires boto3.  
 aws region configured in awscli is used for instances.  
 If any of -i, -r or -z are ommitted a list will be displayed.  
--v output responses from aws.
+-s silent.  
+-v output responses from aws.  
+-w wait for user to press return before exit.  

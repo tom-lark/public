@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 #-*- coding: utf-8 -*-
 
-### accept arguments for instance name, hosted zone name, dns record name
-### only ask for user input if not silent
-
 import argparse
 import boto3
 from botocore.exceptions import ClientError
@@ -11,6 +8,8 @@ from botocore.exceptions import ClientError
 is_main_entry = False
 is_silent = False
 is_verbose = False
+is_debug = False
+wait_exit = False
 
 def create_ec2_client():
 	return boto3.client('ec2')
@@ -20,6 +19,23 @@ def create_ec2_resource():
 
 def create_route53_client():
 	return boto3.client('route53')
+
+def find_hosted_zone_by_name(hosted_zones, hosted_zone_name):
+	for hosted_zone in hosted_zones:
+		if hosted_zone['Name'] == hosted_zone_name:
+			return hosted_zone
+	return None
+
+def find_hosted_zone_record_by_name(hosted_zone_records, dns_record_name):
+	for hosted_zone_record in hosted_zone_records:
+		if hosted_zone_record['Name'] == dns_record_name:
+			return hosted_zone_record
+	return None
+
+def find_instance_by_name(instances, instance_name):
+	if instance_name in instances:
+		return instances[instance_name]
+	return None
 
 def get_hosted_zone_by_index(hosted_zone_index, hosted_zones):
 	return hosted_zones[hosted_zone_index]
@@ -37,16 +53,6 @@ def get_instance_tag(tags, key, default=''):
 		if tag['Key'] == key:
 			return tag['Value']
 	return default
-
-def output(message):
-	if is_silent: return
-	print(message)
-
-def output_error(message):
-	output(message)
-	if is_main_entry:
-		exit()
-	return message
 
 def list_hosted_zones(route53_client):
 	response = route53_client.list_hosted_zones_by_name(MaxItems='9999')
@@ -98,14 +104,31 @@ def list_instances(ec2_client):
 		index = index + 1
 	return instances
 
+def output(message):
+	if is_silent: return
+	print(message)
+
+def output_error(message):
+	output(message)
+	if is_main_entry:
+		if wait_exit:
+			input()
+		exit()
+	return message
+
 def parse_arguments():
 	parser = argparse.ArgumentParser()
+	parser.add_argument("-d", "--debug", action='store_true', help = "Show debug output")
 	parser.add_argument("-i", "--instance-name", help = "Name of instance to start and copy ip address from, instance requires a name tag")
-	parser.add_argument("-r", "--dns-record-name", help = "Name of dns record, ie www.mysite.com")
+	parser.add_argument("-r", "--dns-record-name", help = "Name of dns record, ie www.mysite.com.")
 	parser.add_argument("-s", "--silent", action='store_true', help = "Don't output to console, default False, if True -i, -r, -z are all required")
 	parser.add_argument("-v", "--verbose", action='store_true', help = "Output responses from aws")
-	parser.add_argument("-z", "--hosted-zone-name", help = "Name of hosted zone to update")
+	parser.add_argument("-w", "--wait-exit", action='store_true', help = "Require user to press enter to exit")
+	parser.add_argument("-z", "--hosted-zone-name", help = "Name of hosted zone to update, ie mysite.com.")
 	args = parser.parse_args()
+	if args.debug:
+		global is_debug
+		is_debug = True
 	if args.silent:
 		global is_silent
 		is_silent = True
@@ -114,6 +137,9 @@ def parse_arguments():
 	if args.verbose:
 		global is_verbose
 		is_verbose = True
+	if args.wait_exit:
+		global wait_exit
+		wait_exit = True
 	output(args)
 	return args
 
@@ -134,6 +160,10 @@ def start_instance(ec2_client, instance):
 	return True
 
 def update_hosted_zone_record_ip(route53_client, hosted_zone, hosted_zone_record, instance):
+	if is_debug:
+		print(f"{hosted_zone_record['ResourceRecords'][0]['Value']} == {instance.public_ip_address}")
+	if hosted_zone_record['ResourceRecords'][0]['Value'] == instance.public_ip_address:
+		return output('dns record already set correctly')
 	try:
 		response = route53_client.change_resource_record_sets(
 			HostedZoneId=hosted_zone['Id'],
@@ -181,23 +211,43 @@ def wait_user_choice(selection_type):
 if __name__ == '__main__':
 	is_main_entry = True
 	args = parse_arguments()
-	exit()
 	ec2_resource = create_ec2_resource()
 	instances = list_instances(ec2_resource)
-	user_choice = wait_user_choice('instance')
-	instance_index = validate_user_choice(user_choice, len(instances))
-	instance = get_instance_by_index(instance_index, instances)
+	instance_name_found = False
+	if args.instance_name:
+		instance = find_instance_by_name(instances, args.instance_name)
+		instance_name_found = instance is not None
+	if is_silent and not instance_name_found:
+		output_error(f'instance {args.instance_name} not found')
+	if not instance_name_found:
+		user_choice = wait_user_choice('instance')
+		instance_index = validate_user_choice(user_choice, len(instances))
+		instance = get_instance_by_index(instance_index, instances)
 	ec2_client = create_ec2_client()
 	wait_required = start_instance(ec2_client, instance)
 	route53_client = create_route53_client()
 	hosted_zones = list_hosted_zones(route53_client)
-	user_choice = wait_user_choice('hosted_zone')
-	hosted_zone_index = validate_user_choice(user_choice, len(instances))
-	hosted_zone = get_hosted_zone_by_index(hosted_zone_index, hosted_zones)
+	hosted_zone_name_found = False
+	if args.hosted_zone_name:
+		hosted_zone = find_hosted_zone_by_name(hosted_zones, args.hosted_zone_name)
+		hosted_zone_name_found = hosted_zone is not None
+	if is_silent and not hosted_zone_name_found:
+		output_error(f'hosted zone {args.hosted_zone_name} not found')
+	if not hosted_zone_name_found:
+		user_choice = wait_user_choice('hosted_zone')
+		hosted_zone_index = validate_user_choice(user_choice, len(instances))
+		hosted_zone = get_hosted_zone_by_index(hosted_zone_index, hosted_zones)
 	hosted_zone_records = list_hosted_zone_records(route53_client, hosted_zone)
-	user_choice = wait_user_choice('a record')
-	a_record_index = validate_user_choice(user_choice, len(hosted_zone_records))
-	a_record = get_hosted_zone_record_by_index(a_record_index, hosted_zone_records)
+	dns_record_name_found = False
+	if args.dns_record_name:
+		a_record = find_hosted_zone_record_by_name(hosted_zone_records, args.dns_record_name)
+		dns_record_name_found = a_record is not None
+	if is_silent and not dns_record_name_found:
+		output_error(f'dns record {args.dns_record_name} not found')
+	if not dns_record_name_found:
+		user_choice = wait_user_choice('a record')
+		a_record_index = validate_user_choice(user_choice, len(hosted_zone_records))
+		a_record = get_hosted_zone_record_by_index(a_record_index, hosted_zone_records)
 	if wait_required:
 		wait_for_instance_to_start(ec2_client, instance)
 		instances = list_instances(ec2_resource)
@@ -207,5 +257,11 @@ if __name__ == '__main__':
 		if instance_update.public_ip_address is None:
 			output_error('instance public ip not available')
 		instance = instance_update
+	if is_debug:
+		print(instance)
+		print(hosted_zone)
+		print(a_record)
 	update_hosted_zone_record_ip(route53_client, hosted_zone, a_record, instance)
 	list_hosted_zone_records(route53_client, hosted_zone)
+	if wait_exit:
+		input()
