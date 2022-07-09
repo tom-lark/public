@@ -4,11 +4,14 @@
 import argparse
 import boto3
 from botocore.exceptions import ClientError
+import notify2
 
 is_main_entry = False
 is_silent = False
 is_verbose = False
 is_debug = False
+raise_notifications = False
+raise_final_notification = False
 wait_exit = False
 
 def create_ec2_client():
@@ -45,7 +48,7 @@ def get_hosted_zone_record_by_index(a_record_index, hosted_zone_records):
 
 def get_instance_by_index(instance_index, instances):
 	key = list(instances)[instance_index]
-	return instances[key]
+	return (key, instances[key])
 
 def get_instance_tag(tags, key, default=''):
 	if not tags: return default
@@ -110,6 +113,7 @@ def output(message):
 
 def output_error(message):
 	output(message)
+	raise_notification(message, is_final_notifiaction=True)
 	if is_main_entry:
 		if wait_exit:
 			input()
@@ -120,6 +124,8 @@ def parse_arguments():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("-d", "--debug", action='store_true', help = "Show debug output")
 	parser.add_argument("-i", "--instance-name", help = "Name of instance to start and copy ip address from, instance requires a name tag")
+	parser.add_argument("-n", "--notifications", action='store_true', help = "Raise system notifications")
+	parser.add_argument("-nf", "--final-notification-only", action='store_true', help = "Only raise notification on completion or error")
 	parser.add_argument("-r", "--dns-record-name", help = "Name of dns record, ie www.mysite.com.")
 	parser.add_argument("-s", "--silent", action='store_true', help = "Don't output to console, default False, if True -i, -r, -z are all required")
 	parser.add_argument("-v", "--verbose", action='store_true', help = "Output responses from aws")
@@ -129,6 +135,12 @@ def parse_arguments():
 	if args.debug:
 		global is_debug
 		is_debug = True
+	if args.notifications or args.final_notification_only:
+		global raise_notifications
+		raise_notifications = args.notifications or False
+		global raise_final_notification
+		raise_final_notification = args.final_notification_only or False
+		notify2.init('start-and-update-dns.py')
 	if args.silent:
 		global is_silent
 		is_silent = True
@@ -142,6 +154,12 @@ def parse_arguments():
 		wait_exit = True
 	output(args)
 	return args
+
+def raise_notification(message, is_final_notifiaction=False):
+	if raise_notifications or (raise_final_notification and is_final_notifiaction):
+		notify2.init('init')
+		notice = notify2.Notification('Start Instance / Update DNS', message)
+		notice.show()
 
 def start_instance(ec2_client, instance):
 	output(f'{instance.id} {instance.state["Name"]}')
@@ -198,11 +216,13 @@ def verbose(message):
 	if is_verbose: return
 	output(message)
 
-def wait_for_instance_to_start(ec2_client, instance):
+def wait_for_instance_to_start(ec2_client, instance_name, instance):
 	output('waiting for instance to start')
+	raise_notification(f'Starting instance {instance_name}')
 	instance_runner_waiter = ec2_client.get_waiter('instance_running')
 	instance_runner_waiter.wait(InstanceIds=[instance.id])
 	output('instance is started and running')
+	raise_notification(f'Instance {instance_name} running')
 
 def wait_user_choice(selection_type):
 	output(f"Select {selection_type} index (or q to quit)")
@@ -219,10 +239,13 @@ if __name__ == '__main__':
 		instance_name_found = instance is not None
 	if is_silent and not instance_name_found:
 		output_error(f'instance {args.instance_name} not found')
-	if not instance_name_found:
+	if instance_name_found:
+		instance_name = args.instance_name
+	else:
 		user_choice = wait_user_choice('instance')
 		instance_index = validate_user_choice(user_choice, len(instances))
-		instance = get_instance_by_index(instance_index, instances)
+		(instance_name, instance) = get_instance_by_index(instance_index, instances)
+	raise_notification(f'Found instance {instance_name}')
 	ec2_client = create_ec2_client()
 	wait_required = start_instance(ec2_client, instance)
 	route53_client = create_route53_client()
@@ -237,6 +260,7 @@ if __name__ == '__main__':
 		user_choice = wait_user_choice('hosted_zone')
 		hosted_zone_index = validate_user_choice(user_choice, len(instances))
 		hosted_zone = get_hosted_zone_by_index(hosted_zone_index, hosted_zones)
+	raise_notification(f'Found hosted zone {hosted_zone["Name"]}')
 	hosted_zone_records = list_hosted_zone_records(route53_client, hosted_zone)
 	dns_record_name_found = False
 	if args.dns_record_name:
@@ -248,10 +272,11 @@ if __name__ == '__main__':
 		user_choice = wait_user_choice('a record')
 		a_record_index = validate_user_choice(user_choice, len(hosted_zone_records))
 		a_record = get_hosted_zone_record_by_index(a_record_index, hosted_zone_records)
+	raise_notification(f'Found \'A\' record {a_record["Name"]}')
 	if wait_required:
-		wait_for_instance_to_start(ec2_client, instance)
+		wait_for_instance_to_start(ec2_client, instance_name, instance)
 		instances = list_instances(ec2_resource)
-		instance_update = get_instance_by_index(instance_index, instances)
+		instance_update = find_instance_by_name(instances, instance_name)
 		if instance.id != instance_update.id:
 			output_error(f'{instance.id} != {instance_update.id}')
 		if instance_update.public_ip_address is None:
@@ -263,5 +288,6 @@ if __name__ == '__main__':
 		print(a_record)
 	update_hosted_zone_record_ip(route53_client, hosted_zone, a_record, instance)
 	list_hosted_zone_records(route53_client, hosted_zone)
+	raise_notification(f'Instance Started DNS Updated\n{instance_name} :: {instance.public_ip_address}\n{hosted_zone["Name"]} :: {a_record["Name"]}', is_final_notifiaction=True)
 	if wait_exit:
 		input()
