@@ -186,7 +186,7 @@ def update_hosted_zone_record_ip(route53_client, hosted_zone, hosted_zone_record
 		response = route53_client.change_resource_record_sets(
 			HostedZoneId=hosted_zone['Id'],
 			ChangeBatch= {
-				'Comment': 'changed by tom xps',
+				'Comment': 'updated by script',
 				'Changes': [
 					{
 					'Action': 'UPSERT',
